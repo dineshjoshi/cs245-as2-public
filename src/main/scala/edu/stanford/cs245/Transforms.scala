@@ -3,7 +3,7 @@ package edu.stanford.cs245
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.expressions
 import org.apache.spark.sql.catalyst.expressions.Literal.{FalseLiteral, TrueLiteral}
-import org.apache.spark.sql.catalyst.expressions.{Add, And, BinaryComparison, DecimalLiteral, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, LessThan, LessThanOrEqual, Literal, Multiply, ScalaUDF, Subtract}
+import org.apache.spark.sql.catalyst.expressions.{Add, And, BinaryComparison, DecimalLiteral, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, LessThan, LessThanOrEqual, Literal, Multiply, ScalaUDF, SortOrder, Subtract}
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Sort}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.types.{BooleanType, DataType, Decimal, DoubleType, IntegerType, IntegralType, NumericType}
@@ -33,7 +33,8 @@ object Transforms {
       ReorderExpressions(spark),
       SimplifyDistWithZeroComparison(spark),
       NegativeConstantComparison(spark),
-      SquareTransform(spark))
+      SquareTransform(spark),
+      SortTransform(spark))
   }
 
   case class EliminateZeroDists(spark: SparkSession) extends Rule[LogicalPlan] {
@@ -114,6 +115,29 @@ object Transforms {
     }
   }
 
+  case class SortTransform(spark: SparkSession) extends Rule[LogicalPlan] {
+    def apply(plan: LogicalPlan): LogicalPlan = plan transformUp {
+
+      case s @ Sort(ordering, global, child) => {
+        if (ordering.seq(0).child.isInstanceOf[ScalaUDF]) {
+          val newOrdering = ordering.map(order => {
+            if (order.child.isInstanceOf[ScalaUDF])
+              SortOrder(sq(order.child.asInstanceOf[ScalaUDF]), order.direction, order.sameOrderExpressions)
+            else
+              order
+          })
+          Sort(newOrdering, global, child)
+        }
+        else {
+          s
+        }
+      }
+
+    }
+
+    def sq(i: ScalaUDF): ScalaUDF = getDistSqUdf(i.children)
+  }
+
   case class SquareTransform(spark: SparkSession) extends Rule[LogicalPlan] {
     def apply(plan: LogicalPlan): LogicalPlan = plan transformAllExpressions {
 
@@ -138,7 +162,6 @@ object Transforms {
       }
     }
 
-
     def sq(i: ScalaUDF): ScalaUDF = getDistSqUdf(i.children)
 
     def sq(i: Literal): Literal = {
@@ -158,5 +181,4 @@ object Transforms {
       }
     }
   }
-
 }
