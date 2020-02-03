@@ -86,7 +86,13 @@ object Tester {
   }
 
   def main(args: Array[String]) {
-    val spark = SparkSession.builder.getOrCreate()
+    val sb = SparkSession.builder()
+
+    if (args.contains("local"))
+      sb.config("spark.master", "local")
+
+    val spark = sb.getOrCreate()
+
     spark.sparkContext.setLogLevel("ERROR")
     import spark.implicits._
 
@@ -108,6 +114,42 @@ object Tester {
     var query: Dataset[Row] = null
     var filter: Filter = null
     var output: Seq[Seq[Any]] = null
+
+//    // Custom Tests
+//    startTest(10)
+//    try {
+//      query = df.filter("-1 > dist(x1, y1, x2, y2)")
+//      query.explain(true)
+//      filter = checkFilter(query.queryExecution.optimizedPlan)
+//      checkDist(filter, true)
+////      assert(filter.condition == df.filter("dist(x1, y1, x2, y2) < -1"))
+//      output = query.collect().map(_.toSeq).toSeq
+//      assert(output == Seq(), "Incorrect output: " + output)
+//    } catch {
+//      case t: Throwable => {
+//        assertionFailed = true
+//        t.printStackTrace()
+//      }
+//    }
+//    endTest()
+
+//    startTest(10)
+//    try {
+//      query = df.filter("dist(x1, y1, x2, y2) <= -5")
+//      query.explain(true)
+//      filter = checkFilter(query.queryExecution.optimizedPlan)
+//      checkDist(filter, false)
+//      assert(filter.condition == Literal(false, BooleanType))
+//      output = query.collect().map(_.toSeq).toSeq
+//      assert(output == Seq(), "Incorrect output: " + output)
+//    } catch {
+//      case t: Throwable => {
+//        assertionFailed = true
+//        t.printStackTrace()
+//      }
+//    }
+//    endTest()
+
 
     // Tests
     startTest(10)

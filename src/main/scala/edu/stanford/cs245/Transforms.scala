@@ -1,11 +1,12 @@
 package edu.stanford.cs245
 
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.catalyst.expressions.{And, BinaryComparison, EqualTo, Expression, GreaterThan,
-  GreaterThanOrEqual, LessThan, LessThanOrEqual, Literal, Multiply, ScalaUDF}
+import org.apache.spark.sql.catalyst.expressions
+import org.apache.spark.sql.catalyst.expressions.Literal.{FalseLiteral, TrueLiteral}
+import org.apache.spark.sql.catalyst.expressions.{Add, And, BinaryComparison, DecimalLiteral, EqualTo, Expression, GreaterThan, GreaterThanOrEqual, LessThan, LessThanOrEqual, Literal, Multiply, ScalaUDF, Subtract}
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Sort}
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.types.{BooleanType, DoubleType}
+import org.apache.spark.sql.types.{BooleanType, DataType, Decimal, DoubleType, IntegerType, IntegralType, NumericType}
 
 object Transforms {
 
@@ -28,7 +29,11 @@ object Transforms {
 
   // Return any additional optimization passes here
   def getOptimizationPasses(spark: SparkSession): Seq[Rule[LogicalPlan]] = {
-    Seq(EliminateZeroDists(spark))
+    Seq(EliminateZeroDists(spark),
+      ReorderExpressions(spark),
+      SimplifyDistWithZeroComparison(spark),
+      NegativeConstantComparison(spark),
+      SquareTransform(spark))
   }
 
   case class EliminateZeroDists(spark: SparkSession) extends Rule[LogicalPlan] {
@@ -37,4 +42,87 @@ object Transforms {
         udf.children(1) == udf.children(3) => Literal(0.0, DoubleType)
     }
   }
+
+  case class ReorderExpressions(spark: SparkSession) extends Rule[LogicalPlan] {
+    def apply(plan: LogicalPlan): LogicalPlan = plan transformAllExpressions {
+      case e @ BinaryComparison(l: ScalaUDF, r: ScalaUDF) if isDistUdf(l) && isDistUdf(r) => e
+      case GreaterThan(l, udf: ScalaUDF) if isDistUdf(udf) => LessThan(udf, l)
+      case LessThan(l, udf: ScalaUDF) if isDistUdf(udf) => GreaterThan(udf, l)
+      case GreaterThanOrEqual(l, udf: ScalaUDF) if isDistUdf(udf) => LessThanOrEqual(udf, l)
+      case LessThanOrEqual(l, udf: ScalaUDF) if isDistUdf(udf) => GreaterThanOrEqual(udf, l)
+      case EqualTo(l, udf: ScalaUDF) if isDistUdf(udf) => EqualTo(udf, l)
+    }
+  }
+
+  case class SimplifyDistWithZeroComparison(spark: SparkSession) extends Rule[LogicalPlan] {
+    def apply(plan: LogicalPlan): LogicalPlan = plan transformAllExpressions {
+      case e @ EqualTo(udf: ScalaUDF, r: Literal) if isDistUdf(udf) && r.dataType.isInstanceOf[NumericType] => {
+        if (isZero(r))
+          EqualTo(Add(Subtract(udf.children(2), udf.children(0)), Subtract(udf.children(3), udf.children(1))), r)
+        else
+          e
+      }
+    }
+
+    def isZero(i: Literal): Boolean = {
+      i.value match {
+        case v: Double => v == 0
+        case v: Float => v == 0
+        case v: Integer => v == 0
+        case _ => false
+      }
+    }
+  }
+
+  case class NegativeConstantComparison(spark: SparkSession) extends Rule[LogicalPlan] {
+    def apply(plan: LogicalPlan): LogicalPlan = plan transformAllExpressions   {
+      case e @ LessThan(udf: ScalaUDF, r: Literal) if isDistUdf(udf) && r.dataType.isInstanceOf[NumericType] => {
+        r.value match {
+          case v: Double => if (v <= 0) FalseLiteral else e
+          case v: Float => if (v <= 0) FalseLiteral else e
+          case v: Integer => if (v <= 0) FalseLiteral else e
+        }
+      }
+      case e @ LessThanOrEqual(udf: ScalaUDF, r: Literal) if isDistUdf(udf) && r.dataType.isInstanceOf[NumericType] => {
+        r.value match {
+          case v: Double => if (v <= 0) FalseLiteral else e
+          case v: Float => if (v <= 0) FalseLiteral else e
+          case v: Integer => if (v <= 0) FalseLiteral else e
+        }
+      }
+    }
+  }
+
+  case class SquareTransform(spark: SparkSession) extends Rule[LogicalPlan] {
+    def apply(plan: LogicalPlan): LogicalPlan = plan transformAllExpressions {
+      case e @ BinaryComparison(udf: ScalaUDF, r: Literal) if isDistUdf(udf) && r.dataType.isInstanceOf[NumericType]
+        && isPositive(r) => {
+        e match {
+          case GreaterThan(udf: ScalaUDF, r: Literal) => GreaterThan(getDistSqUdf(udf.children), sq(r))
+          case LessThan(udf: ScalaUDF, r: Literal) => LessThan(getDistSqUdf(udf.children), sq(r))
+          case GreaterThanOrEqual(udf: ScalaUDF, r: Literal) => GreaterThanOrEqual(getDistSqUdf(udf.children), sq(r))
+          case LessThanOrEqual(udf: ScalaUDF, r: Literal) => LessThanOrEqual(getDistSqUdf(udf.children), sq(r))
+          case EqualTo(udf: ScalaUDF, r: Literal) => EqualTo(getDistSqUdf(udf.children), sq(r))
+        }
+      }
+    }
+
+    def sq(i: Literal): Literal = {
+      i.value match {
+        case v: Double => Literal(math.pow(v, 2), DoubleType)
+        case v: Float => Literal(math.pow(v, 2), DoubleType)
+        case v: Integer => Literal(math.pow(v.doubleValue(), 2), DoubleType)
+      }
+    }
+
+    def isPositive(i: Literal): Boolean = {
+      i.value match {
+        case v: Double => v >= 0
+        case v: Float => v >= 0
+        case v: Integer => v >= 0
+        case _ => false
+      }
+    }
+  }
+
 }
