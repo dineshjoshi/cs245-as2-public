@@ -240,6 +240,8 @@ In this join query, the optimizer chooses to push down the predicates, employs $
 
 \item As noted in previous problems the predicate pushdown and $null$ check can result in big IO savings as the underlying Data Source can skip a lot of blocks if it uses Run Length Encoding or similar compression schemes where it doesn't need to read the block to skip certain values. This check doesn't help reduce IOs if the column is always populated with a non-$null$ value.
 
+\item Applying the predicate individually to each table reduces the overall rows that need to be considered for the join. This also has a big impact on the performance.
+
 \item After the predicate is applied we apply $\prod_{city, country}$ and $\prod_{country, pop}$ to the respective tables. If the underlying Data Source is columnar then it can avoid reading and materializing other columns in memory. Therefore the projections can improve the performance.
 
 \item Finally, the top level projection $\prod_{Cities.city, Countries.pop}$ only projects the columns that are requested.
@@ -275,7 +277,7 @@ WHERE country LIKE "%ia"
 \end{verbatim}
 
 \subsection*{Analyzed Logical Plan}
-$\prod_{country, pop, EU, coastline}(\sigma_{country LIKE ``\%i\%a"}(Countries))$
+$\prod_{country, pop, EU, coastline}(\sigma_{country LIKE ``\%ia"}(Countries))$
 
 
 \subsection*{Optimized Logical Plan}
