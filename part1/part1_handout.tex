@@ -1,5 +1,5 @@
 \documentclass[12pt]{article}
-\usepackage{fullpage,amssymb}
+\usepackage{fullpage,amssymb,url}
 \setlength\parindent{0pt}
 
 % Make each "\section{}" become "Problem N"
@@ -128,13 +128,16 @@ WHERE coastline = "yes"
 \end{verbatim}
 
 \subsection*{Analyzed Logical Plan}
-\vspace{2in}
+
+$\prod_{country, EU}(\sigma_{coastline = ``yes"}(Countries))$
 
 \subsection*{Optimized Logical Plan}
-\vspace{2in}
+
+$\prod_{country, EU}(\sigma_{isnotnull(coastline) \wedge coastline = ``yes"}(Countries))$
 
 \subsection*{Explanation}
 
+The optimizer adds $isnotnull(coastline)$ to the predicate. The $ null$ check filters out rows that have $coastline$ column set to $null$. $null$ checks are faster to test compared to string equality checks i.e. $coastline = ``yes"$. The underlying Data Source also can avoid disk IOs if it uses Run Length Encoding or other compression algorithms that allow it to skip rows with certain values without reading the whole block. We will see this benefit when we run the query over tables that have a lot of rows with $null$ values in the $coastline$ column. 
 \newpage
 
 \section{}
@@ -148,12 +151,27 @@ WHERE temp < 4
 \end{verbatim}
 
 \subsection*{Analyzed Logical Plan}
-\vspace{2in}
+
+$\prod_{city}(\sigma_{(int)temp < 4}(\prod_{city, temp}(Cities)))$
 
 \subsection*{Optimized Logical Plan}
-\vspace{2in}
+
+$\prod_{city}(\sigma_{isnotnull(temp) \wedge ((int)temp < 4)}(Cities))$
 
 \subsection*{Explanation}
+
+The query uses a sub-query to project $city$ and $temp$ columns from the $Cities$ table and later filters rows $temp < 4$. Finally the query only projects the $city$ column. The optimizer makes 3 changes to the query:
+
+\begin{enumerate}
+
+
+\item The optimizer removes the sub-query as it is redundant. The sub-query unnecessarily forces Spark to read \textit{all} blocks from disk and materialize rows in memory only to later find that those rows may not match the filter criteria $temp < 4$. Removing the sub-query does not change the outcome of the result and avoids unnecessary IOs.
+
+\item The optimizer introduces the $isnotnull(temp)$ check \textit{before} casting it to $int$. Performing this condition check filters rows where the $temp$ column is $null$. This can benefit tables that have a large number of $null$s. The underlying DataSource plugin can efficiently skip large number of rows if it uses $Run Length Encoding$ or similar compression algorithm where it doesn't need to read the actual block to filter on the value.
+
+\item The optimizer only projects the $city$ column. Depending on the underlying Data Source, we can entirely avoid the cost of reading any columns except $city$ and $temp$.
+
+\end{enumerate}
 
 \newpage
 
@@ -167,13 +185,33 @@ WHERE Cities.country = Countries.country
 \end{verbatim}
 
 \subsection*{Analyzed Logical Plan}
-\vspace{2in}
+
+$\prod(\sigma_{(((Countries.country = Cities.country) \wedge ((int)temp < 4))  \wedge ((int)pop > 6))}(Cities \bowtie Countries))$
+
+
 
 \subsection*{Optimized Logical Plan}
-\vspace{2in}
+
+$\sigma_{((isnotnull(temp) \wedge ((int)temp < 4)) \wedge isnotnull(country))}(Cities) \bowtie \\
+\sigma_{((isnotnull(pop) \wedge ((int)pop > 6)) \wedge isnotnull(country))}(Countries)$
 
 \subsection*{Explanation}
 
+This query is performing a join between $Cities$ and $Countries$ table on the $country$ column. Later it only selects the rows that have $temp < 4 \wedge pop > 6$. In this case the analyzed logical plan first performs a natural join on the $country$ column and then applies the predicate to filter the rows. This can be inefficient so the optimizer performs 3 optimizations:
+
+\begin{enumerate}
+\item The optimizer eliminates the explicit $\prod$ operator. We're reading all columns anyway.
+
+\item The optimizer pushes down the predicate that is applicable for each table. This reduces the overall number of IOs and rows that Spark needs to join. For example, $\sigma_{(int)temp < 4)}(Cities)$ may produce a much smaller result set assuming the predicate is highly selectivity.
+
+
+\item The optimizer introduces $isnotnull$ check to both $temp$ and $pop$ column allowing the underlying Data Source to skip rows that have null values in those columns.
+
+\item Finally, the optimizer adds $isnotnull(country)$ to the predicates to filter out records that have $null$ values in the $country$ column. Since this column is used for joining the two tables it has to be non $null$.
+
+\end{enumerate}
+
+By adding $isnotnull$ checks and pushing down predicates the optimizer can greatly reduce the number of records that need to be read and joined. This saves on IO, CPU and Memory cost.
 \newpage
 
 \section{}
@@ -185,12 +223,28 @@ WHERE Cities.country = Countries.country
 \end{verbatim}
 
 \subsection*{Analyzed Logical Plan}
-\vspace{2in}
+
+$\prod_{Cities.city, Countries.pop}(\sigma_{Cities.country = Countries.country \wedge (int) Countries.pop > 6}(Cities \bowtie Countries))$
 
 \subsection*{Optimized Logical Plan}
-\vspace{2in}
+
+$\prod_{Cities.city, Countries.pop}((\prod_{city, country}(\sigma_{isnotnull(country)}(Cities))) \bowtie \\
+ (\prod_{country, pop}(\sigma_{(isnotnull(pop) \wedge ((int) pop > 6)) \wedge isnotnull(country)}(Country))))$
+
 
 \subsection*{Explanation}
+
+In this join query, the optimizer chooses to push down the predicates, employs $null$ checks and projects only the $city$, $country$, $pop$ columns from their respective tables.
+
+\begin{enumerate}
+
+\item As noted in previous problems the predicate pushdown and $null$ check can result in big IO savings as the underlying Data Source can skip a lot of blocks if it uses Run Length Encoding or similar compression schemes where it doesn't need to read the block to skip certain values.
+
+\item After the predicate is applied we apply $\prod_{city, country}$ and $\prod_{country, pop}$ to the respective tables. If the underlying Data Source is columnar then it can avoid reading and materializing other columns in memory. Therefore the projections can improve the performance.
+
+\item Finally, the top level projection $\prod_{Cities.city, Countries.pop}$ only projects the columns that are requested.
+
+\end{enumerate}
 
 \newpage
 
@@ -202,12 +256,14 @@ WHERE country LIKE "%e%d"
 \end{verbatim}
 
 \subsection*{Analyzed Logical Plan}
-\vspace{2in}
+$\prod_{country, pop, EU, coastline}(\sigma_{country LIKE ``\%e\%d"}(Countries))$
 
 \subsection*{Optimized Logical Plan}
-\vspace{2in}
+$\sigma_{isnotnull(country) \wedge country LIKE ``\%e\%d"}(Countries)$
 
 \subsection*{Explanation}
+
+Here the optimizer eliminates the projection as we're projecting all columns. It also adds $isnotnull(country)$ to the predicate. The $null$ check can significantly reduce the IOs to filter out records especially if the underlying Data Source plugin is using Run Length Encoding or similar compression. This check doesn't help reduce IOs if the column is always populated with a non-$null$ value.
 
 \newpage
 
@@ -219,12 +275,24 @@ WHERE country LIKE "%ia"
 \end{verbatim}
 
 \subsection*{Analyzed Logical Plan}
-\vspace{2in}
+$\prod_{country, pop, EU, coastline}(\sigma_{country LIKE ``\%i\%a"}(Countries))$
+
 
 \subsection*{Optimized Logical Plan}
-\vspace{2in}
+$\sigma_{isnotnull(country) \wedge EndsWith(country, ``ia")}(Countries)$
+
 
 \subsection*{Explanation}
+
+\begin{enumerate}
+
+
+\item Here the optimizer eliminates the projection as we're projecting all columns. 
+
+\item It also adds $isnotnull(country)$ to the predicate. The $null$ check can significantly reduce the IOs to filter out records especially if the underlying Data Source plugin is using Run Length Encoding or similar compression. This check doesn't help reduce IOs if the column is always populated with a non-$null$ value.
+
+\item The optimizer also prefers the specialized $EndsWith$ over the $LIKE$ clause. The $LIKE$ clause results into a full regular expression evaluation. Comparatively, prefix and postfix matches can be implemented cheaply.
+\end{enumerate}
 
 \newpage
 
@@ -238,13 +306,21 @@ FROM (
 \end{verbatim}
 
 \subsection*{Analyzed Logical Plan}
-\vspace{2in}
+$\prod_{t1 + 1 \rightarrow t2} ( \prod_{(int)temp + 1 \rightarrow t1} (Cities) )$
 
 \subsection*{Optimized Logical Plan}
-\vspace{2in}
+$\prod_{(int)temp + 2 \rightarrow t2}(Cities)$
 
 \subsection*{Explanation}
 
+The given query has a sub-query which casts the $temp$ column to an Integer and adds 1. The query subsequently reads this column value and adds one to the resulting sum. In this case the optimizer performs the following optimizations leading to a different Optimized Logical Plan:
+
+\begin{enumerate}
+\item Eliminates the sub-query as it doesn't add any value.
+\item Eliminating the sub-query leads to an algebraic expression of the form $temp + 1 + 1$ which can be simplified to $temp + 2$.
+\end{enumerate}
+
+This can be accomplished because the original query casts the $temp$ column to an Integer. Integer sum is associative and commutative.
 \newpage
 
 \section{(Extra Credit -- purely optional)}
@@ -257,11 +333,36 @@ FROM (
 \end{verbatim}
 
 \subsection*{Analyzed Logical Plan}
-\vspace{2in}
+$\prod_{t1 + (double)1 \rightarrow t2} ( \prod_{(double) temp + (double) 1 \rightarrow t1} (Cities) )$
 
 \subsection*{Optimized Logical Plan}
-\vspace{2in}
+$\prod_{(((double) temp + 1.0) + 1.0) \rightarrow t2}(Cities)$
 
 \subsection*{Explanation}
+
+This query should be optimized similar to the one in Problem 7 but it isn't. 
+
+\begin{enumerate}
+\item The key difference is that Problem 7's query treats the $temp$ column as an Integer while in Problem 8, Spark's Type Inference identifies it as a Double (Floating point value).
+
+\item As we all know floating point arithmetic is not necessarily associative[1]. Therefore the optimizer cannot simplify this expression. This is confirmed by the fact that the optimizer's ReorderAssociativeOperator[2] code only optimizes Integral types[3].
+\end{enumerate}
+
+Of note is the following quote from ``What Every Computer Scientist Should Know About Floating-Point Arithmetic (Appendix D)"[1]. 
+
+\begin{quote}
+Due to roundoff errors, the associative laws of algebra do not necessarily hold for floating-point numbers. For example, the expression (x+y)+z has a totally different answer than $x+(y+z)$ when $x = 10^{30}$, $y = -10^{30}$ and $z = 1$ (it is 1 in the former case, 0 in the latter). \textit{The importance of preserving parentheses cannot be overemphasized.} [emphasis added]
+\end{quote}
+
+As you can see, Spark's optimizer does not even simplify the expression to remove the parentheses from $(((double)temp + 1.0) + 1.0)$.
+
+
+\begin{tiny}
+\begin{verbatim}
+[1] https://docs.oracle.com/cd/E19957-01/806-3568/ncg_goldberg.html
+[2] https://github.com/apache/spark/blob/v2.3.3/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/expressions.scala#L156
+[3] https://github.com/apache/spark/blob/v2.3.3/sql/catalyst/src/main/scala/org/apache/spark/sql/catalyst/optimizer/expressions.scala#L188
+\end{verbatim}
+\end{tiny}
 
 \end{document}
